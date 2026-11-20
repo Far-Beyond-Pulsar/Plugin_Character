@@ -81,6 +81,25 @@ impl Default for CharacterComponent {
 #[world_component]
 impl CharacterComponent {}
 
+/// The character's Blueprint and script surface: the controls a graph drives it
+/// with (the properties `move_input` is a pair of numbers, which scripts cannot
+/// set directly).
+#[pulsar_scenedb::component_methods]
+impl CharacterComponent {
+    /// Walk this way: `x` right and `y` forward, each from -1 to 1 (a stick or
+    /// the keys), until it is set again. `0, 0` stands still.
+    #[reflect_method(category = "Character")]
+    fn set_move(&mut self, x: f32, y: f32) {
+        self.move_input = [x.clamp(-1.0, 1.0), y.clamp(-1.0, 1.0)];
+    }
+
+    /// Jump on the next frame the controller is grounded.
+    #[reflect_method(category = "Character")]
+    fn request_jump(&mut self) {
+        self.jump = true;
+    }
+}
+
 /// The character's movement system.
 pub const MOVE: System = System::new("pulsar.character.move", drive)
     .after(&["pulsar.input.devices", COMPONENTS])
