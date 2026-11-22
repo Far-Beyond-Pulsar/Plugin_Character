@@ -6,10 +6,15 @@ publish = false
 description = "pulsar.character: a character as one component (a facade) over a skeletal mesh, its animator, a character controller and the player's input, with its movement system"
 
 [features]
+# The plugin as a library of its own, loaded by the editor from plugins/editor:
+# cargo build -p <this package> --release --features dll
+dll = ["editor", "dep:plugin_editor_api", "plugin_editor_api/editor", "plugin_editor_api/shared-dylibs"]
 # The Create menu's character (`ui_level_editor::extend::CreateEntry`).
 editor = ["dep:ui_level_editor"]
 
 [dependencies]
+# The plugin library's editor plugin entry point (feature `dll`).
+plugin_editor_api = { workspace = true, optional = true }
 # The plugin's descriptor and its build.
 pulsar_plugins = { workspace = true }
 # Its class: `#[engine_class]`, `#[world_component]` and the builder's
@@ -26,3 +31,7 @@ ui_level_editor = { workspace = true, optional = true }
 
 [lints]
 workspace = true
+
+# Also the plugin as a library of its own (feature `dll`, loaded by the editor).
+[lib]
+crate-type = ["cdylib", "rlib"]
