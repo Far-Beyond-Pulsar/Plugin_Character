@@ -109,6 +109,13 @@ pub const MOVE: System = System::new("pulsar.character.move", drive)
 /// places, with its movement system) and, in the editor, the Create menu's
 /// character.
 pub fn build(p: &mut pulsar_plugins::PluginBuilder) {
+    // The icon the editor shows beside this plugin (Extensions window).
+    #[cfg(feature = "editor")]
+    p.add(pulsar_plugins::PluginIcon {
+        origin: p.origin(),
+        format: pulsar_plugins::IconFormat::Png,
+        bytes: include_bytes!("../icon.png"),
+    });
     p.components().class::<CharacterComponent>(ClassSpec {
         requires: MEMBERS,
         systems: &[MOVE],
