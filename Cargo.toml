@@ -1,6 +1,6 @@
 [package]
 name = "character_plugin"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 publish = false
 description = "pulsar.character: a character as one component (a facade) over a skeletal mesh, its animator, a character controller and the player's input, with its movement system"
