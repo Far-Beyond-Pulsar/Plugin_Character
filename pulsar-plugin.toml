@@ -8,7 +8,7 @@ description = "A character as one component over a skeletal mesh, its animator, 
 enabled_by_default = true
 root = "character_plugin"
 provides = [
-    { id = "pulsar.character.classes", kind = "class", members = ["CharacterComponent"], version = 2 },
+    { id = "pulsar.character.classes", kind = "class", members = ["CharacterComponent"], version = 3 },
 ]
 # The classes a character places with itself: by class name, so the plugin
 # links none of their crates (runtime `class` contracts).

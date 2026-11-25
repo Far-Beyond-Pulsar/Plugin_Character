@@ -22,6 +22,7 @@
 //!
 //! This crate is the plugin's root: [`build`] registers everything.
 
+use engine_backend::scene::game_hooks::{ControlRotationRegistration, ViewTurn};
 use engine_backend::scene::{ClassSpec, ComponentsBuilder, Transform};
 use engine_class_derive::{engine_class, world_component};
 use pulsar_world_registry::pulsar_scene_model::attachments::{self, ComponentOwner};
@@ -88,6 +89,21 @@ pub struct CharacterComponent {
     /// Control roll in degrees (0 unless a script sets it).
     #[property(category = "Control Rotation")]
     pub control_roll: f32,
+    /// The input action whose value turns the control rotation (`add_look`): the
+    /// frame's late look reads the player's mouse through it.
+    #[property(category = "Control Rotation")]
+    pub look_action: String,
+    /// Degrees of yaw (positive turns left) and of pitch (positive looks up) one
+    /// unit of the look action's value turns the view by (`add_look`); a negative
+    /// pitch inverts.
+    #[property(category = "Control Rotation")]
+    pub look_degrees_per_unit: [f32; 2],
+    /// A graph has turned the control rotation with `add_look`, so the look
+    /// action's value is known to turn it by `look_degrees_per_unit` and nothing
+    /// else: only then does the frame apply the newest mouse motion ahead of the
+    /// tick (`pending_view_turn`). Not saved.
+    #[serde(skip)]
+    pub look_driven: bool,
     /// Lowest control pitch, degrees (looking down).
     #[property(min = -89.0, max = 0.0, step = 0.5, category = "Control Rotation")]
     pub view_pitch_min: f32,
@@ -125,6 +141,9 @@ impl Default for CharacterComponent {
             control_yaw: 0.0,
             control_pitch: 0.0,
             control_roll: 0.0,
+            look_action: "IA_Look".to_string(),
+            look_degrees_per_unit: [-1.0, 1.0],
+            look_driven: false,
             view_pitch_min: -80.0,
             view_pitch_max: 80.0,
             use_controller_rotation_yaw: false,
@@ -176,6 +195,20 @@ impl CharacterComponent {
         }
     }
 
+    /// Turn the control rotation by one look input: `x` and `y` are the look action's
+    /// value (the mouse or the stick), each unit turning the view by
+    /// `look_degrees_per_unit`, the pitch held between its limits. The shipped
+    /// `IA_Look` handler calls this and nothing else.
+    #[reflect_method(category = "Control Rotation")]
+    fn add_look(&mut self, x: f32, y: f32) {
+        if x.is_finite() && y.is_finite() {
+            let turn = self.view_turn([x, y]);
+            self.look_driven = true;
+            self.control_yaw = wrap_degrees(self.control_yaw + turn.yaw_degrees);
+            self.control_pitch = turn.pitched(self.control_pitch);
+        }
+    }
+
     /// Walk toward a direction of the world (x east, y up is ignored, z south)
     /// by `scale`: added to this frame's movement, whatever the character
     /// faces. `set_move` is the relative one (right and forward of the view).
@@ -190,6 +223,19 @@ impl CharacterComponent {
 }
 
 impl CharacterComponent {
+    /// What a look action value turns the view by, and the limits it holds: the
+    /// one rule `add_look` (the tick) and the frame's late look share.
+    pub fn view_turn(&self, look: [f32; 2]) -> ViewTurn {
+        let (pitch_min, pitch_max) = self.pitch_limits();
+        let [yaw_rate, pitch_rate] = self.look_degrees_per_unit;
+        ViewTurn {
+            yaw_degrees: look[0] * yaw_rate,
+            pitch_degrees: look[1] * pitch_rate,
+            pitch_min,
+            pitch_max,
+        }
+    }
+
     /// The view pitch limits, degrees, finite, inside +-89 and ordered.
     pub fn pitch_limits(&self) -> (f32, f32) {
         let clean = |v: f32, fallback: f32| if v.is_finite() { v.clamp(-89.0, 89.0) } else { fallback };
@@ -261,8 +307,42 @@ pub fn build(p: &mut pulsar_plugins::PluginBuilder) {
         presentation: Presentation::Facade,
         ..ClassSpec::default()
     });
+    // The frame's late look: the newest mouse motion turns the view ahead of the
+    // tick that will apply it (`engine_backend::scene::game_hooks`).
+    p.add(ControlRotationRegistration {
+        origin: p.origin(),
+        name: "character.control_rotation",
+        look_action: driven_look_action,
+        turn: driven_turn,
+    });
     #[cfg(feature = "editor")]
     editor::build(p);
+}
+
+/// The look action of `pawn`'s character, once a graph drives its control rotation with it.
+fn driven_look_action(world: &pulsar_scenedb::World, pawn: pulsar_scenedb::Entity) -> Option<String> {
+    let character = character_of(world, pawn)?;
+    (character.look_driven && !character.look_action.is_empty())
+        .then(|| character.look_action.clone())
+}
+
+fn driven_turn(
+    world: &pulsar_scenedb::World,
+    pawn: pulsar_scenedb::Entity,
+    look: [f32; 2],
+) -> Option<ViewTurn> {
+    Some(character_of(world, pawn)?.view_turn(look))
+}
+
+/// The enabled character component of `pawn`.
+fn character_of(
+    world: &pulsar_scenedb::World,
+    pawn: pulsar_scenedb::Entity,
+) -> Option<&CharacterComponent> {
+    world
+        .query::<(&CharacterComponent, &ComponentOwner)>()
+        .find(|(_, (_, link))| link.entity() == pawn && link.is_enabled())
+        .map(|(_, (character, _))| character)
 }
 
 /// One character's step, read before writing (the world is borrowed by the
@@ -478,6 +558,81 @@ mod tests {
         for i in 0..3 {
             assert!((a[i] - b[i]).abs() < 1e-5, "{a:?} vs {b:?}");
         }
+    }
+
+    /// The frame's late look and the tick's `add_look` are one rule: the view the
+    /// frame shows ahead of a tick (control rotation plus the pending turn) is the
+    /// view the tick writes when it applies the same look, in every case that
+    /// matters: yaw across the wrap, pitch against each limit, an inverted pitch.
+    #[test]
+    fn the_late_look_and_the_tick_reach_the_same_view() {
+        let cases: [([f32; 2], f32, f32, [f32; 2]); 5] = [
+            ([3.0, 2.0], 10.0, 0.0, [-1.0, 1.0]),
+            ([-40.0, 0.5], 170.0, 75.0, [-1.0, 1.0]),
+            ([25.0, 400.0], -175.0, 60.0, [-0.5, 1.0]),
+            ([5.0, 90.0], 0.0, -70.0, [-1.0, -1.0]),
+            ([0.0, 0.0], 33.0, 12.0, [-1.0, 1.0]),
+        ];
+        for (look, yaw, pitch, rates) in cases {
+            let mut character = CharacterComponent {
+                control_yaw: yaw,
+                control_pitch: pitch,
+                look_degrees_per_unit: rates,
+                ..CharacterComponent::default()
+            };
+            let turn = character.view_turn(look);
+            // What the frame shows: the tick's last view and the pending turn.
+            let late_yaw = wrap_degrees(character.control_yaw + turn.yaw_degrees);
+            let late_pitch = turn.pitched(character.control_pitch);
+            // What the tick then writes.
+            character.add_look(look[0], look[1]);
+            assert!(
+                wrap_degrees(character.control_yaw - late_yaw).abs() < 1e-4,
+                "{look:?}: yaw {} vs {late_yaw}",
+                character.control_yaw
+            );
+            assert_eq!(character.control_pitch, late_pitch, "{look:?}");
+        }
+    }
+
+    /// Splitting a motion between two frames and a tick changes nothing: the
+    /// pending turn of a part plus the tick's turn of the rest is the whole.
+    #[test]
+    fn a_motion_split_across_a_tick_turns_the_view_once() {
+        let mut ticked = CharacterComponent::default();
+        let mut late = CharacterComponent::default();
+        let motion = [[1.5, 0.5], [2.5, -0.25], [-0.75, 1.0], [4.0, 0.0]];
+        // Tick path: each sample applied as it is taken.
+        for look in motion {
+            ticked.add_look(look[0], look[1]);
+        }
+        // Late path: the first two applied by a tick, the last two shown ahead and
+        // then applied by the next.
+        late.add_look(motion[0][0], motion[0][1]);
+        late.add_look(motion[1][0], motion[1][1]);
+        let pending = [motion[2][0] + motion[3][0], motion[2][1] + motion[3][1]];
+        let turn = late.view_turn(pending);
+        let shown = (
+            wrap_degrees(late.control_yaw + turn.yaw_degrees),
+            turn.pitched(late.control_pitch),
+        );
+        late.add_look(motion[2][0], motion[2][1]);
+        late.add_look(motion[3][0], motion[3][1]);
+        assert!(wrap_degrees(shown.0 - late.control_yaw).abs() < 1e-4);
+        assert!((shown.1 - late.control_pitch).abs() < 1e-4);
+        assert!(wrap_degrees(ticked.control_yaw - late.control_yaw).abs() < 1e-4);
+        assert!((ticked.control_pitch - late.control_pitch).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_character_is_late_looked_only_once_a_graph_drives_it_with_add_look() {
+        let mut character = CharacterComponent::default();
+        assert!(!character.look_driven, "nothing drove the view yet");
+        character.add_control_yaw(5.0);
+        assert!(!character.look_driven, "the control methods alone do not say how a look maps");
+        character.add_look(1.0, 0.0);
+        assert!(character.look_driven);
+        assert_eq!(character.control_yaw, 4.0, "a unit turns the view by the rate: -1 degree, plus 5");
     }
 
     #[test]
